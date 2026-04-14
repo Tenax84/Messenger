@@ -1,0 +1,16 @@
+{
+  "name": "messenger",
+  "version": "1.0.0",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "electron": "^41.2.0",
+    "electron-store": "^11.0.2"
+  }
+}
