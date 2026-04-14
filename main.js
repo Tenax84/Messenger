@@ -80,12 +80,29 @@ function createWindow() {
     return { action: 'deny' };
   });
 
-  // Intercept navigation to non-facebook URLs and open in default browser
+  // Intercept navigation - only allow messenger pages, open everything else in browser
   view.webContents.on('will-navigate', (event, url) => {
-    const parsed = new URL(url);
-    if (!parsed.hostname.endsWith('facebook.com') && !parsed.hostname.endsWith('messenger.com')) {
-      event.preventDefault();
-      shell.openExternal(url);
+    try {
+      const parsed = new URL(url);
+      const isFbAuth = parsed.hostname.endsWith('facebook.com') && (
+        parsed.pathname.startsWith('/login') ||
+        parsed.pathname.startsWith('/checkpoint') ||
+        parsed.pathname.startsWith('/two_step_verification') ||
+        parsed.pathname.startsWith('/recover') ||
+        parsed.pathname.startsWith('/cookie') ||
+        parsed.pathname.startsWith('/logout') ||
+        parsed.pathname === '/'
+      );
+      const isMessenger =
+        (parsed.hostname.endsWith('facebook.com') && parsed.pathname.startsWith('/messages')) ||
+        parsed.hostname.endsWith('messenger.com') ||
+        isFbAuth;
+      if (!isMessenger) {
+        event.preventDefault();
+        shell.openExternal(url);
+      }
+    } catch {
+      // invalid URL, let it pass
     }
   });
 
@@ -161,14 +178,27 @@ ipcMain.on('show-context-menu', (event, params) => {
     menuItems.push({ label: 'Osszes kijelolese', role: 'selectAll' });
   }
 
+  // Always add logout option
   if (menuItems.length > 0) {
     // Remove trailing separator if present
     if (menuItems[menuItems.length - 1].type === 'separator') {
       menuItems.pop();
     }
-    const menu = Menu.buildFromTemplate(menuItems);
-    menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
+    menuItems.push({ type: 'separator' });
   }
+  menuItems.push({
+    label: 'Kijelentkezes',
+    click: () => {
+      if (view) {
+        view.webContents.session.clearStorageData().then(() => {
+          view.webContents.loadURL('https://www.facebook.com/messages');
+        });
+      }
+    },
+  });
+
+  const menu = Menu.buildFromTemplate(menuItems);
+  menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
 });
 
 app.whenReady().then(createWindow);
