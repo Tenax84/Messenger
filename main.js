@@ -13,11 +13,144 @@ const store = new Store({
 
 let mainWindow;
 let view;
+let videoView;
+let videoViewVertical = false;
+
+function isVideoUrl(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === 'fb.watch') return true;
+    if (!parsed.hostname.endsWith('facebook.com')) return false;
+    return (
+      parsed.pathname.startsWith('/share/r/') ||
+      parsed.pathname.startsWith('/share/v/') ||
+      parsed.pathname.startsWith('/reel') ||
+      parsed.pathname.startsWith('/watch') ||
+      parsed.pathname.startsWith('/video.php') ||
+      /^\/[^/]+\/videos\//.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isPhotoUrl(url) {
+  try {
+    const parsed = new URL(url);
+    // direct image file links (any host)
+    if (/\.(jpe?g|png|gif|webp|avif|bmp)$/i.test(parsed.pathname)) return true;
+    if (!parsed.hostname.endsWith('facebook.com')) return false;
+    return (
+      parsed.pathname.startsWith('/photo') ||
+      parsed.pathname.startsWith('/messenger_media') ||
+      parsed.pathname.startsWith('/share/p/') ||
+      parsed.pathname.startsWith('/permalink.php') ||
+      parsed.pathname.startsWith('/story.php') ||
+      /^\/[^/]+\/photos\//.test(parsed.pathname) ||
+      /^\/[^/]+\/posts\//.test(parsed.pathname)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function isVerticalVideoUrl(url) {
+  try {
+    const parsed = new URL(url);
+    return parsed.pathname.startsWith('/share/r/') || parsed.pathname.startsWith('/reel');
+  } catch {
+    return false;
+  }
+}
+
+function updateVideoViewBounds() {
+  if (!mainWindow || !videoView) return;
+  const [winW, winH] = mainWindow.getContentSize();
+  const margin = 40;
+  const size = videoViewVertical
+    ? { width: Math.min(920, winW - margin), height: Math.min(820, winH - margin) }
+    : { width: Math.min(1280, winW - margin), height: Math.min(720, winH - margin) };
+  videoView.setBounds({
+    x: Math.round((winW - size.width) / 2),
+    y: Math.round((winH - size.height) / 2),
+    width: size.width,
+    height: size.height,
+  });
+}
+
+// The messenger view is shifted up by BANNER_HEIGHT, so "top of the window"
+// is at BANNER_HEIGHT in page coordinates.
+const BACKDROP_JS = `
+(() => {
+  if (document.getElementById('__videoOverlayBackdrop')) return;
+  const d = document.createElement('div');
+  d.id = '__videoOverlayBackdrop';
+  d.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.65);z-index:2147483647;cursor:pointer;';
+  const c = document.createElement('div');
+  c.textContent = '\\u2715';
+  c.title = 'Bezaras (Esc)';
+  c.style.cssText = 'position:fixed;top:${BANNER_HEIGHT + 12}px;right:18px;font-size:26px;line-height:1;color:#fff;font-family:sans-serif;';
+  d.appendChild(c);
+  d.addEventListener('click', () => window.__closeVideoOverlay && window.__closeVideoOverlay());
+  document.body.appendChild(d);
+})();
+`;
+
+function closeVideoOverlay() {
+  if (!videoView) return;
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.removeBrowserView(videoView);
+  }
+  videoView.webContents.destroy();
+  videoView = null;
+  if (view && !view.webContents.isDestroyed()) {
+    view.webContents
+      .executeJavaScript(`document.getElementById('__videoOverlayBackdrop')?.remove();`)
+      .catch(() => {});
+    view.webContents.focus();
+  }
+}
+
+function openVideoWindow(url) {
+  if (!mainWindow || !view) return;
+  videoViewVertical = isVerticalVideoUrl(url);
+
+  if (!videoView) {
+    videoView = new BrowserView({
+      webPreferences: {
+        nodeIntegration: false,
+        contextIsolation: true,
+      },
+    });
+
+    // Links opened from the video dialog go to the default browser
+    videoView.webContents.setWindowOpenHandler(({ url: childUrl }) => {
+      shell.openExternal(childUrl);
+      return { action: 'deny' };
+    });
+
+    // Esc closes the dialog
+    videoView.webContents.on('before-input-event', (event, input) => {
+      if (input.type === 'keyDown' && input.key === 'Escape') {
+        event.preventDefault();
+        closeVideoOverlay();
+      }
+    });
+
+    mainWindow.addBrowserView(videoView);
+  }
+
+  view.webContents.executeJavaScript(BACKDROP_JS).catch(() => {});
+  updateVideoViewBounds();
+  videoView.webContents.loadURL(url);
+  videoView.webContents.focus();
+}
 
 function updateViewBounds() {
   if (!mainWindow || !view) return;
   const [width, height] = mainWindow.getContentSize();
   view.setBounds({ x: 0, y: -BANNER_HEIGHT, width, height: height + BANNER_HEIGHT });
+  updateVideoViewBounds();
 }
 
 function createWindow() {
@@ -74,9 +207,13 @@ function createWindow() {
 
   view.webContents.loadURL('https://www.facebook.com/messages');
 
-  // Open all new window links in default browser
+  // Video and photo links open in an in-app dialog, everything else in default browser
   view.webContents.setWindowOpenHandler(({ url }) => {
-    shell.openExternal(url);
+    if (isVideoUrl(url) || isPhotoUrl(url)) {
+      openVideoWindow(url);
+    } else {
+      shell.openExternal(url);
+    }
     return { action: 'deny' };
   });
 
@@ -99,11 +236,20 @@ function createWindow() {
         isFbAuth;
       if (!isMessenger) {
         event.preventDefault();
-        shell.openExternal(url);
+        if (isVideoUrl(url) || isPhotoUrl(url)) {
+          openVideoWindow(url);
+        } else {
+          shell.openExternal(url);
+        }
       }
     } catch {
       // invalid URL, let it pass
     }
+  });
+
+  // Close the video dialog if the messenger view navigates away
+  view.webContents.on('did-start-navigation', (details) => {
+    if (details.isMainFrame && !details.isSameDocument) closeVideoOverlay();
   });
 
   // Update view bounds on resize
@@ -132,6 +278,10 @@ function createWindow() {
     view = null;
   });
 }
+
+ipcMain.on('close-video-overlay', closeVideoOverlay);
+
+ipcMain.on('open-media-dialog', (event, url) => openVideoWindow(url));
 
 ipcMain.on('show-context-menu', (event, params) => {
   const menuItems = [];
