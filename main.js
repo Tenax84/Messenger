@@ -15,6 +15,7 @@ let mainWindow;
 let view;
 let videoView;
 let videoViewVertical = false;
+let lastUnreadCount = 0;
 
 // Links in chat messages go through Facebook's link shim
 // (l.facebook.com/l.php?u=<target>) - unwrap to get the real destination
@@ -278,6 +279,20 @@ function createWindow() {
       openVideoWindow(target);
     }
   });
+
+  // Flash the taskbar icon when a new message arrives - Messenger prefixes
+  // the page title with the unread count, e.g. "(2) Messenger"
+  view.webContents.on('page-title-updated', (event, title) => {
+    const match = title.match(/^\((\d+)\+?\)/);
+    const unread = match ? parseInt(match[1], 10) : 0;
+    if (unread > lastUnreadCount && !mainWindow.isFocused()) {
+      mainWindow.flashFrame(true);
+    }
+    lastUnreadCount = unread;
+  });
+
+  // Stop the highlight once the user switches back to the window
+  mainWindow.on('focus', () => mainWindow.flashFrame(false));
 
   // Update view bounds on resize
   mainWindow.on('resize', updateViewBounds);
