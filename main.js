@@ -1,4 +1,4 @@
-const { app, BrowserWindow, BrowserView, screen, shell, ipcMain, Menu } = require('electron');
+const { app, BrowserWindow, BrowserView, screen, shell, ipcMain, Menu, session } = require('electron');
 const path = require('path');
 const Store = require('electron-store').default;
 
@@ -15,6 +15,19 @@ let mainWindow;
 let view;
 let videoView;
 let videoViewVertical = false;
+
+// Links in chat messages go through Facebook's link shim
+// (l.facebook.com/l.php?u=<target>) - unwrap to get the real destination
+function unwrapLinkShim(url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname.endsWith('facebook.com') && parsed.pathname === '/l.php') {
+      const target = parsed.searchParams.get('u');
+      if (target) return target;
+    }
+  } catch {}
+  return url;
+}
 
 function isVideoUrl(url) {
   try {
@@ -209,8 +222,9 @@ function createWindow() {
 
   // Video and photo links open in an in-app dialog, everything else in default browser
   view.webContents.setWindowOpenHandler(({ url }) => {
-    if (isVideoUrl(url) || isPhotoUrl(url)) {
-      openVideoWindow(url);
+    const target = unwrapLinkShim(url);
+    if (isVideoUrl(target) || isPhotoUrl(target)) {
+      openVideoWindow(target);
     } else {
       shell.openExternal(url);
     }
@@ -236,8 +250,9 @@ function createWindow() {
         isFbAuth;
       if (!isMessenger) {
         event.preventDefault();
-        if (isVideoUrl(url) || isPhotoUrl(url)) {
-          openVideoWindow(url);
+        const target = unwrapLinkShim(url);
+        if (isVideoUrl(target) || isPhotoUrl(target)) {
+          openVideoWindow(target);
         } else {
           shell.openExternal(url);
         }
@@ -250,6 +265,18 @@ function createWindow() {
   // Close the video dialog if the messenger view navigates away
   view.webContents.on('did-start-navigation', (details) => {
     if (details.isMainFrame && !details.isSameDocument) closeVideoOverlay();
+  });
+
+  // Safety net: if the FB SPA still navigates in-page to a media URL
+  // (e.g. keyboard activation bypassing the click handler), step back
+  // and open the dialog instead
+  view.webContents.on('did-navigate-in-page', (event, url, isMainFrame) => {
+    if (!isMainFrame) return;
+    const target = unwrapLinkShim(url);
+    if (isVideoUrl(target) || isPhotoUrl(target)) {
+      if (view.webContents.canGoBack()) view.webContents.goBack();
+      openVideoWindow(target);
+    }
   });
 
   // Update view bounds on resize
@@ -281,7 +308,7 @@ function createWindow() {
 
 ipcMain.on('close-video-overlay', closeVideoOverlay);
 
-ipcMain.on('open-media-dialog', (event, url) => openVideoWindow(url));
+ipcMain.on('open-media-dialog', (event, url) => openVideoWindow(unwrapLinkShim(url)));
 
 ipcMain.on('show-context-menu', (event, params) => {
   const menuItems = [];
@@ -351,12 +378,32 @@ ipcMain.on('show-context-menu', (event, params) => {
   menu.popup({ window: BrowserWindow.fromWebContents(event.sender) });
 });
 
-app.whenReady().then(createWindow);
-
-app.on('window-all-closed', () => {
+// A second instance sharing the same profile directory corrupts the cache and
+// leaves the page stuck on the loading skeleton - allow only one instance
+if (!app.requestSingleInstanceLock()) {
   app.quit();
-});
+} else {
+  app.on('second-instance', () => {
+    if (mainWindow) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  });
 
-app.on('activate', () => {
-  if (mainWindow === null) createWindow();
-});
+  app.whenReady().then(async () => {
+    // Clear leftover caches from previous runs (keeps cookies, so no re-login)
+    try {
+      await session.defaultSession.clearCache();
+      await session.defaultSession.clearCodeCaches({});
+    } catch {}
+    createWindow();
+  });
+
+  app.on('window-all-closed', () => {
+    app.quit();
+  });
+
+  app.on('activate', () => {
+    if (mainWindow === null) createWindow();
+  });
+}
